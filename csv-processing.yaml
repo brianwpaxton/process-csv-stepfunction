@@ -1,59 +1,82 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  Simple S3 CSV processing example using EventBridge,
+  Simple S3 CSV processing demonstration using EventBridge,
   Step Functions Distributed Map and Lambda.
 
 Resources:
 
-  # ------------------------------------------------------------
+  # ============================================================
   # S3 bucket
-  # ------------------------------------------------------------
+  # ============================================================
 
   CsvBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+
     Properties:
       NotificationConfiguration:
         EventBridgeConfiguration:
           EventBridgeEnabled: true
+
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
 
-  # ------------------------------------------------------------
+
+  # ============================================================
   # Lambda execution role
-  # ------------------------------------------------------------
+  # ============================================================
 
   ProcessRowLambdaRole:
     Type: AWS::IAM::Role
+
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
+
         Statement:
           - Effect: Allow
+
             Principal:
               Service:
                 - lambda.amazonaws.com
+
             Action:
               - sts:AssumeRole
 
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
-  # ------------------------------------------------------------
-  # Lambda - processes a single CSV row
-  # ------------------------------------------------------------
+
+  # ============================================================
+  # CloudWatch log group for Lambda
+  # ============================================================
+
+  ProcessRowLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProcessRowLambda}"
+      RetentionInDays: 7
+
+
+  # ============================================================
+  # Lambda - processes one CSV row
+  # ============================================================
 
   ProcessRowLambda:
     Type: AWS::Lambda::Function
+
     Properties:
       Runtime: python3.12
       Handler: index.lambda_handler
+
       Role: !GetAtt ProcessRowLambdaRole.Arn
+
       Timeout: 30
 
       Code:
@@ -62,99 +85,142 @@ Resources:
 
           def lambda_handler(event, context):
 
-              print("Received CSV row:")
+              print("Processing CSV row:")
               print(json.dumps(event))
 
-              # Pretend to call the target API
-              print("Pretending to call target API...")
+              row_id = str(event.get("id", ""))
 
-              if event["id"] == "3":
-                raise Exception("Pretend API failure")
+              # Simulate an API failure for selected rows.
+              if row_id in ["3", "5"]:
+                  print(f"Simulating API failure for row {row_id}")
+                  raise Exception(
+                      f"Simulated API failure for row {row_id}"
+                  )
+
+              # Simulate successful API call.
+              print(f"Simulated API call succeeded for row {row_id}")
 
               return {
                   "status": "SUCCESS",
                   "row": event
               }
 
-  # ------------------------------------------------------------
+
+  # ============================================================
   # Step Functions execution role
-  # ------------------------------------------------------------
+  # ============================================================
 
   CsvStateMachineRole:
     Type: AWS::IAM::Role
+
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
+
         Statement:
           - Effect: Allow
+
             Principal:
               Service:
                 - states.amazonaws.com
+
             Action:
               - sts:AssumeRole
 
       Policies:
 
-        # Read CSV files from S3
+        # --------------------------------------------------------
+        # Allow Step Functions to read CSV files from S3
+        # --------------------------------------------------------
+
         - PolicyName: ReadCsvFromS3
+
           PolicyDocument:
             Version: "2012-10-17"
+
             Statement:
+
               - Effect: Allow
+
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
+
                 Resource:
                   - !Sub "${CsvBucket.Arn}/input/*"
 
               - Effect: Allow
+
                 Action:
                   - s3:ListBucket
+
                 Resource:
                   - !GetAtt CsvBucket.Arn
+
                 Condition:
                   StringLike:
                     s3:prefix:
                       - input/*
 
-        # Invoke the Lambda for each CSV row
+
+        # --------------------------------------------------------
+        # Allow Step Functions to invoke Lambda
+        # --------------------------------------------------------
+
         - PolicyName: InvokeRowLambda
+
           PolicyDocument:
             Version: "2012-10-17"
+
             Statement:
+
               - Effect: Allow
+
                 Action:
                   - lambda:InvokeFunction
+
                 Resource:
                   - !GetAtt ProcessRowLambda.Arn
 
-        # Distributed Map child executions
+
+        # --------------------------------------------------------
+        # Permissions required by Distributed Map
+        # --------------------------------------------------------
+
         - PolicyName: DistributedMap
+
           PolicyDocument:
             Version: "2012-10-17"
+
             Statement:
+
               - Effect: Allow
+
                 Action:
                   - states:StartExecution
+
                 Resource:
-                  - !Sub >
-                    arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-CsvProcessor
+                  - !GetAtt CsvStateMachine.Arn
 
               - Effect: Allow
+
                 Action:
                   - states:DescribeExecution
+
                 Resource:
-                  - !Sub >
+                  - !Sub
                     arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:${AWS::StackName}-CsvProcessor:*
 
-  # ------------------------------------------------------------
+
+  # ============================================================
   # Step Functions state machine
-  # ------------------------------------------------------------
+  # ============================================================
 
   CsvStateMachine:
     Type: AWS::StepFunctions::StateMachine
 
     Properties:
+
       StateMachineType: STANDARD
 
       StateMachineName: !Sub "${AWS::StackName}-CsvProcessor"
@@ -163,9 +229,12 @@ Resources:
 
       DefinitionString: !Sub |
         {
-          "Comment": "Process CSV rows from S3",
+          "Comment": "Process each row in a CSV file from S3",
+
           "StartAt": "Process CSV",
+
           "States": {
+
             "Process CSV": {
               "Type": "Map",
 
@@ -184,6 +253,7 @@ Resources:
               },
 
               "ItemProcessor": {
+
                 "ProcessorConfig": {
                   "Mode": "DISTRIBUTED",
                   "ExecutionType": "STANDARD"
@@ -192,7 +262,9 @@ Resources:
                 "StartAt": "Process Row",
 
                 "States": {
+
                   "Process Row": {
+
                     "Type": "Task",
 
                     "Resource": "arn:aws:states:::lambda:invoke",
@@ -202,7 +274,46 @@ Resources:
                       "Payload.$": "$"
                     },
 
-                    "OutputPath": "$.Payload",
+                    "ResultPath": "$.apiResult",
+
+                    "Catch": [
+                      {
+                        "ErrorEquals": [
+                          "States.ALL"
+                        ],
+
+                        "ResultPath": "$.error",
+
+                        "Next": "Row Failed"
+                      }
+                    ],
+
+                    "Next": "Row Succeeded"
+                  },
+
+
+                  "Row Succeeded": {
+
+                    "Type": "Pass",
+
+                    "Parameters": {
+                      "status": "SUCCESS",
+                      "row.$": "$"
+                    },
+
+                    "End": true
+                  },
+
+
+                  "Row Failed": {
+
+                    "Type": "Pass",
+
+                    "Parameters": {
+                      "status": "FAILED",
+                      "row.$": "$",
+                      "error.$": "$.error"
+                    },
 
                     "End": true
                   }
@@ -214,45 +325,62 @@ Resources:
           }
         }
 
-  # ------------------------------------------------------------
-  # IAM role allowing EventBridge to start Step Functions
-  # ------------------------------------------------------------
+
+  # ============================================================
+  # EventBridge role
+  # ============================================================
 
   EventBridgeStepFunctionsRole:
     Type: AWS::IAM::Role
+
     Properties:
+
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
+
         Statement:
           - Effect: Allow
+
             Principal:
               Service:
                 - events.amazonaws.com
+
             Action:
               - sts:AssumeRole
 
       Policies:
+
         - PolicyName: StartCsvStateMachine
+
           PolicyDocument:
             Version: "2012-10-17"
+
             Statement:
+
               - Effect: Allow
+
                 Action:
                   - states:StartExecution
+
                 Resource:
                   - !GetAtt CsvStateMachine.Arn
 
-  # ------------------------------------------------------------
+
+  # ============================================================
   # EventBridge rule
-  # ------------------------------------------------------------
+  # ============================================================
 
   CsvUploadRule:
     Type: AWS::Events::Rule
 
     Properties:
-      Description: Start CSV processing when a CSV is uploaded
+
+      Description: >
+        Start CSV processing when a CSV file is uploaded
+        to the input prefix.
 
       EventPattern:
+
         source:
           - aws.s3
 
@@ -260,11 +388,13 @@ Resources:
           - Object Created
 
         detail:
+
           bucket:
             name:
               - !Ref CsvBucket
 
           object:
+
             key:
               - prefix: input/
               - suffix: .csv
@@ -272,15 +402,19 @@ Resources:
       State: ENABLED
 
       Targets:
+
         - Id: StartCsvStateMachine
+
           Arn: !GetAtt CsvStateMachine.Arn
+
           RoleArn: !GetAtt EventBridgeStepFunctionsRole.Arn
 
-          # Convert the S3 event into the input expected
-          # by the Step Function.
           InputTransformer:
+
             InputPathsMap:
+
               bucket: "$.detail.bucket.name"
+
               key: "$.detail.object.key"
 
             InputTemplate: |
@@ -289,20 +423,45 @@ Resources:
                 "key": "<key>"
               }
 
+
+# ==============================================================
+# Outputs
+# ==============================================================
+
 Outputs:
 
   CsvBucketName:
+
     Description: S3 bucket for CSV uploads
+
     Value: !Ref CsvBucket
 
-  UploadPrefix:
-    Description: Upload CSV files here
+
+  UploadLocation:
+
+    Description: Upload CSV files to this location
+
     Value: !Sub "s3://${CsvBucket}/input/"
 
+
+  ResultsNote:
+
+    Description: >
+      Currently processing results are visible in the Step
+      Functions execution history. No result file is generated.
+
+    Value: "See Step Functions execution details"
+
+
   StateMachineArn:
-    Description: Step Functions state machine
+
+    Description: Step Functions state machine ARN
+
     Value: !GetAtt CsvStateMachine.Arn
 
+
   LambdaArn:
-    Description: Row processing Lambda
+
+    Description: Lambda used to process individual CSV rows
+
     Value: !GetAtt ProcessRowLambda.Arn
