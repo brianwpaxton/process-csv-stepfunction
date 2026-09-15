@@ -53,7 +53,7 @@ Resources:
 
 
   # ============================================================
-  # CloudWatch log group for Lambda
+  # Lambda CloudWatch log group
   # ============================================================
 
   ProcessRowLambdaLogGroup:
@@ -90,9 +90,10 @@ Resources:
 
               row_id = str(event.get("id", ""))
 
-              # Simulate an API failure for selected rows.
+              # Simulate API failures for selected rows.
               if row_id in ["3", "5"]:
                   print(f"Simulating API failure for row {row_id}")
+
                   raise Exception(
                       f"Simulated API failure for row {row_id}"
                   )
@@ -130,7 +131,7 @@ Resources:
       Policies:
 
         # --------------------------------------------------------
-        # Allow Step Functions to read CSV files from S3
+        # Read CSV from S3
         # --------------------------------------------------------
 
         - PolicyName: ReadCsvFromS3
@@ -164,7 +165,7 @@ Resources:
 
 
         # --------------------------------------------------------
-        # Allow Step Functions to invoke Lambda
+        # Invoke Lambda for each row
         # --------------------------------------------------------
 
         - PolicyName: InvokeRowLambda
@@ -185,6 +186,9 @@ Resources:
 
         # --------------------------------------------------------
         # Permissions required by Distributed Map
+        #
+        # Wildcard avoids a CloudFormation circular dependency
+        # on the state machine itself.
         # --------------------------------------------------------
 
         - PolicyName: DistributedMap
@@ -200,7 +204,8 @@ Resources:
                   - states:StartExecution
 
                 Resource:
-                  - !GetAtt CsvStateMachine.Arn
+                  - !Sub
+                    "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*"
 
               - Effect: Allow
 
@@ -209,7 +214,7 @@ Resources:
 
                 Resource:
                   - !Sub
-                    arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:${AWS::StackName}-CsvProcessor:*
+                    "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:*:*"
 
 
   # ============================================================
@@ -230,104 +235,57 @@ Resources:
       DefinitionString: !Sub |
         {
           "Comment": "Process each row in a CSV file from S3",
-
           "StartAt": "Process CSV",
-
           "States": {
-
             "Process CSV": {
               "Type": "Map",
-
               "ItemReader": {
                 "Resource": "arn:aws:states:::s3:getObject",
-
                 "ReaderConfig": {
                   "InputType": "CSV",
                   "CSVHeaderLocation": "FIRST_ROW"
                 },
-
                 "Parameters": {
                   "Bucket.$": "$.bucket",
                   "Key.$": "$.key"
                 }
               },
-
               "ItemProcessor": {
-
                 "ProcessorConfig": {
                   "Mode": "DISTRIBUTED",
                   "ExecutionType": "STANDARD"
                 },
-
                 "StartAt": "Process Row",
-
                 "States": {
-
                   "Process Row": {
-
                     "Type": "Task",
-
                     "Resource": "arn:aws:states:::lambda:invoke",
-
                     "Parameters": {
                       "FunctionName": "${ProcessRowLambda.Arn}",
                       "Payload.$": "$"
                     },
-
                     "ResultPath": "$.apiResult",
-
-                    "Catch": [
-                      {
-                        "ErrorEquals": [
-                          "States.ALL"
-                        ],
-
-                        "ResultPath": "$.error",
-
-                        "Next": "Row Failed"
-                      }
-                    ],
-
                     "Next": "Row Succeeded"
                   },
-
-
                   "Row Succeeded": {
-
                     "Type": "Pass",
-
                     "Parameters": {
                       "status": "SUCCESS",
                       "row.$": "$"
                     },
-
-                    "End": true
-                  },
-
-
-                  "Row Failed": {
-
-                    "Type": "Pass",
-
-                    "Parameters": {
-                      "status": "FAILED",
-                      "row.$": "$",
-                      "error.$": "$.error"
-                    },
-
                     "End": true
                   }
                 }
               },
-
-              "End": true
+              "End": true,
+              "ToleratedFailurePercentage": 45
             }
           }
         }
 
 
   # ============================================================
-  # EventBridge role
+  # EventBridge IAM role
   # ============================================================
 
   EventBridgeStepFunctionsRole:
@@ -431,37 +389,19 @@ Resources:
 Outputs:
 
   CsvBucketName:
-
     Description: S3 bucket for CSV uploads
-
     Value: !Ref CsvBucket
 
-
   UploadLocation:
-
     Description: Upload CSV files to this location
-
     Value: !Sub "s3://${CsvBucket}/input/"
 
 
-  ResultsNote:
-
-    Description: >
-      Currently processing results are visible in the Step
-      Functions execution history. No result file is generated.
-
-    Value: "See Step Functions execution details"
-
-
   StateMachineArn:
-
     Description: Step Functions state machine ARN
-
     Value: !GetAtt CsvStateMachine.Arn
 
 
   LambdaArn:
-
     Description: Lambda used to process individual CSV rows
-
     Value: !GetAtt ProcessRowLambda.Arn
